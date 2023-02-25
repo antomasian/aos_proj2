@@ -1,0 +1,11 @@
+Makefile
+output.9
+ README.md
+README.md
+tester
+tests
+tests-out
+test.txt
+test-wish.sh
+wish
+wish.c
