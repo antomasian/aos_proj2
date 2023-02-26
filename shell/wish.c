@@ -15,7 +15,9 @@ void print_error() {
     write(STDERR_FILENO, error_message, strlen(error_message));
 }
 
-void run_external(char* cmd, char **args, int nargs, FILE* fo) {
+int run_external(char* cmd, char **args, int nargs, FILE* fo) {
+    // printf("call to run external\n");
+
     int rc = fork();
     if (rc < 0) {
         // printf("fork failed\n");
@@ -35,20 +37,32 @@ void run_external(char* cmd, char **args, int nargs, FILE* fo) {
         myargs[nargs] = NULL;
 
         if (fo != NULL) {
+            // printf("fo not null");
             dup2(fileno(fo), STDOUT_FILENO);
+            close(fileno(fo));
         }
 
-        execv(cmd, myargs);
+        execvp(cmd, myargs);
 
         for (int j=0; j<nargs+1; j++) {
             free(myargs[j]);
         }
+
+        // if (fo != 0) {
+        //     fclose(fo);
+        //     fo = 0;
+        // }
     
-    } else {
-        // int rc_wait = 
-        wait(NULL);
-        // printf("parent of %d (rc_wait:%d) (pid:%d)\n", rc, rc_wait, (int) getpid());
-    }
+    } 
+
+    return rc;
+    // else {
+    //     // int rc_wait = 
+    //     // if (last) {
+    //         wait(NULL);
+    //     // }
+    //     // printf("parent of %d (rc_wait:%d) (pid:%d)\n", rc, rc_wait, (int) getpid());
+    // }
 }
 
 void parse_args(char *line, int nread, const char* delim, struct Cmd *cmd) {
@@ -79,12 +93,6 @@ int main(int argc, char *argv[]) {
     size_t len = 0;
     ssize_t nread = 0;
 
-    char *cline = malloc(8);
-    cline[0] = '\0';
-
-    struct Cmd maincmd = { malloc(8), 0 };
-    struct Cmd delimcmd = { malloc(8), 0 };
-
     char exit_cmd[] = "exit";
     char cd_cmd[] = "cd";
     char path_cmd[] = "path";
@@ -93,28 +101,23 @@ int main(int argc, char *argv[]) {
     paths[0] = strdup("/bin");
     int npaths = 1;
 
+    int* rcs = malloc(sizeof(int));
+    int n = 0;
+
     FILE* fp = NULL;
-    FILE* fo = NULL;
 
     auto void clean_exit();
     void clean_exit(int code) {
         for (int i=0; i<npaths; i++) { free(paths[i]); }
-        free_cmd(&maincmd);
-        free_cmd(&delimcmd);
         free(line);
-        free(cline);
         free(paths);
         if (fp != NULL) {
             fclose(fp);
-        }
-        if (fo != 0) {
-            fclose(fo);
         }
         exit(code);
     }
 
     // check if inputs come from stdin or a file
-
     if (argc==2) {
         fp = fopen(argv[1], "r");
             
@@ -122,141 +125,176 @@ int main(int argc, char *argv[]) {
             print_error();
             clean_exit(1);
         }
-
     } else if (argc>2) {
         print_error();
         clean_exit(1);
     }
 
     while(1) {
+
+        n=0;
+
+        // either read from stdin or file
         if (!fp) {
             printf("wish> ");
             nread = getline(&line, &len, stdin);
         } else {
             nread = getline(&line, &len, fp);
         }
+        // if EOF exit
         if (nread == -1) {
             clean_exit(0);
         }
 
+        // move on if receive a blank line
         int nonwhitespace = 0;
         for (int i=0; i<nread-1; i++) {
             if (line[i] != ' ') {
                 nonwhitespace = 1;
             } 
         }
-
-        // move on if receive a blank line
         if (nonwhitespace == 0) {
             continue;
         }
 
-        // initially set cline to line
-        cline = realloc(cline, nread+1);
-        memcpy(cline, line, nread+1);
-        cline[nread] = '\0';
+        struct Cmd cmds = { malloc(8), 0 };
+    
+        parse_args(line, nread, "&", &cmds);           
 
-        // check for redirection
-        int count = 0;
-        for (int i=0; i<strlen(line); i++) {
-            if (line[i] == '>') {
-                count ++;
+        // int rcs[cmds.nargs];
+
+        // loop over commands
+        for (int j=0; j<cmds.nargs; j++) {
+
+            struct Cmd maincmd = { malloc(8), 0 };
+
+            struct Cmd delimcmd = { malloc(8), 0 };
+
+            FILE* fo = NULL;
+
+            // check for redirects
+            int count = 0;
+            for (int i=0; i<strlen(cmds.args[j]); i++) {
+                if (cmds.args[j][i] == '>') {
+                    count ++;
+                }
             }
-        }
 
-        // only one redirection symbol allowed
-        if (count > 1) {
-            print_error();
-            continue;
-        } else if (count == 1) {
-            parse_args(line, nread, ">", &delimcmd);
-            if (delimcmd.nargs == 1) {
+            char *cline = malloc(8);
+            cline[0] = '\0';
+
+            // only one redirection symbol allowed
+            if (count > 1) {
+                free_cmd(&delimcmd);
+                free(cline);
+                free_cmd(&maincmd);
                 print_error();
                 continue;
-            } else {
-                cline = realloc(cline, strlen(delimcmd.args[0])+1);
-                memcpy(cline, delimcmd.args[0], strlen(delimcmd.args[0]));
-                cline[strlen(delimcmd.args[0])] = '\0';
-                nread = strlen(delimcmd.args[0])+1;
+            } else if (count == 1) {
+    
+                parse_args(cmds.args[j], strlen(cmds.args[j])+1, ">", &delimcmd);
 
-                // delimcmd.args[1][strlen(delimcmd.args[1])] = '\0';
-                // printf("delimcmd.args[1] = %s\n", delimcmd.args[1]);
+                if (delimcmd.nargs == 1) {
+                    print_error();
+                    free_cmd(&maincmd);
+                    free(cline);
+                    free_cmd(&delimcmd);
+                    continue;
+                } else {
+                    cline = realloc(cline, strlen(delimcmd.args[0])+1);
+                    memcpy(cline, delimcmd.args[0], strlen(delimcmd.args[0]));
+                    cline[strlen(delimcmd.args[0])] = '\0';
+                    nread = strlen(delimcmd.args[0])+1;
 
-                struct Cmd rightcmd = { malloc(8), 0 };
-                parse_args(delimcmd.args[1], strlen(delimcmd.args[1])+1, " \t", &rightcmd);
-                // printf("rightcmd.args[0] is '%s'; nargs %i\n", rightcmd.args[0], rightcmd.nargs);
-                if (rightcmd.nargs>=2) {
+                    delimcmd.args[1][strlen(delimcmd.args[1])] = '\0';
+
+                    // make sure only one output file is provided
+                    struct Cmd rightcmd = { malloc(8), 0 };
+                    parse_args(delimcmd.args[1], strlen(delimcmd.args[1])+1, " \t", &rightcmd);
+                    if (rightcmd.nargs>=2) {
+                        // printf("here");
+                        free_cmd(&rightcmd);
+                        free_cmd(&delimcmd);
+                        free(cline);
+                        free_cmd(&maincmd);
+                        print_error();
+                        continue;
+                    }
+
+                    // try to open the output file
+                    fo = fopen(rightcmd.args[0], "w+");
+                    if (fo == NULL) {
+                        print_error();
+                        continue;
+                    }
+
                     free_cmd(&rightcmd);
-                    print_error();
-                    continue;
-                }
+                    
+                } 
+            }
 
-                // try to open the output file
-                fo = fopen(rightcmd.args[0], "w+");
-                if (fo == NULL) {
-                    print_error();
-                    continue;
-                }
-
-                free_cmd(&rightcmd);
-            } 
-        }
-
-        parse_args(cline, nread, " \t", &maincmd);
-
-        // built-in commands
-        if (strncmp(maincmd.args[0], exit_cmd, strlen(exit_cmd)) == 0) {
-            if (maincmd.nargs > 1) {
-                print_error();
+            if (cline[0] != '\0') {
+                parse_args(cline, nread, " \t", &maincmd);
+                // free(cline);
             } else {
-                clean_exit(0);
+                parse_args(cmds.args[j], strlen(cmds.args[j])+1, " \t", &maincmd);
+                // free(cline);
             }
-        } else if (strncmp(maincmd.args[0], cd_cmd, strlen(cd_cmd)) == 0) {
-            if (maincmd.nargs != 2) {
-                print_error();
-            } else {
-                int result = chdir(maincmd.args[1]);
-                if (result==-1) {
+
+            // printf("maincmd is %s\n", maincmd.args[0]);
+
+            // built-in commands
+            if (strncmp(maincmd.args[0], exit_cmd, strlen(exit_cmd)) == 0) {
+                if (maincmd.nargs > 1) {
                     print_error();
+                } else {
+                    free_cmd(&delimcmd);
+                    free_cmd(&maincmd);
+                    free_cmd(&cmds);
+                    free(cline);
+                    clean_exit(0);
                 }
-            }
-        } else if (strncmp(maincmd.args[0], path_cmd, strlen(path_cmd)) == 0) {
-            int n = maincmd.nargs-1;
+            } else if (strncmp(maincmd.args[0], cd_cmd, strlen(cd_cmd)) == 0) {
+                if (maincmd.nargs != 2) {
+                    print_error();
+                } else {
+                    int result = chdir(maincmd.args[1]);
+                    if (result==-1) {
+                        print_error();
+                    }
+                }
+            } else if (strncmp(maincmd.args[0], path_cmd, strlen(path_cmd)) == 0) {
+                int n = maincmd.nargs-1;
 
-            for (int i=0; i<npaths; i++) {
-                free(paths[i]);
-            }
+                for (int i=0; i<npaths; i++) {
+                    free(paths[i]);
+                }
 
-            paths = realloc(paths, n * sizeof(*paths));
-            for (int i=0; i<n; i++) {
-                paths[i] = strdup(maincmd.args[i+1]);
-            }
-
-            npaths = n;
-        }  
-        
-        else {
-            // check for parallel commands
-            struct Cmd cmds = { malloc(8), 0 };
-            parse_args(cline, nread, "&", &cmds);
-
-
-            for (int p=0; p<cmds.nargs; p++) {
-
-                struct Cmd pcmd = { malloc(8), 0 };
-                parse_args(cmds.args[p], strlen(cmds.args[p])+1, " \t", &pcmd);
-
+                paths = realloc(paths, n * sizeof(*paths));
+                for (int i=0; i<n; i++) {
+                    paths[i] = strdup(maincmd.args[i+1]);
+                }
+                npaths = n;
+            } else {
                 // loop over paths, print error message if not found anywhere
                 int found_exec = 0;
-                for (int j=0; j<npaths; j++) {
-                    int pathlen = strlen(paths[j]) + strlen(pcmd.args[0]) + 2;
+                for (int m=0; m<npaths; m++) {
+                    int pathlen = strlen(paths[m]) + strlen(maincmd.args[0]) + 2;
                     char* expath = malloc(8*pathlen); // TODO: Cause for leak?
-                    sprintf(expath, "%s/%s", paths[j], pcmd.args[0]);
+                    sprintf(expath, "%s/%s", paths[m], maincmd.args[0]);
 
                     int result = access(expath, X_OK);
                     if (result==0) {
                         found_exec = 1;
-                        run_external(expath, pcmd.args, pcmd.nargs, fo);
+                        int rc = run_external(expath, maincmd.args, maincmd.nargs, fo);
+                        // if (rc>0) {
+                        //     wait(NULL);
+                        // }
+                        // rcs[j] = rc;
+                        n++;
+                        rcs = realloc(rcs, n*sizeof(int));
+                        rcs[n-1] = rc;
+
                         free(expath);
                         break;
                     }
@@ -267,32 +305,30 @@ int main(int argc, char *argv[]) {
                 if (!found_exec) {
                     print_error();
                 }
-
-                free_cmd(&pcmd);
             }
 
-            free_cmd(&cmds);
+
+            free_cmd(&maincmd);
+            free_cmd(&delimcmd);
+
+            if (fo != 0) {
+                fclose(fo);
+                fo = 0;
+            }
+
+            free(cline);
         }
 
-        // free memory between commands
-        // printf("freeing memory\n");
+        // free_cmd(&delimcmd);
+        free_cmd(&cmds);
 
-        for (int i=0; i<maincmd.nargs; i++) {
-            free(maincmd.args[i]);
+        for (int i=0; i<n; i++) {
+            // wait(NULL);
+            // printf("waiting %i", i);
+            int status;
+            waitpid(rcs[i], &status, 0);
         }
-        maincmd.nargs = 0;
 
-        for (int i=0; i<delimcmd.nargs; i++) {
-            free(delimcmd.args[i]);
-        }
-        delimcmd.nargs = 0;
-
-        cline[0] = '\0';
-
-        if (fo != 0) {
-            fclose(fo);
-            fo = 0;
-        }
     }
     
     return 0;
